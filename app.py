@@ -625,3 +625,323 @@ elif tab == "📊 Simulated vs. Actual":
             st.warning("Please run a simulation first in the Compounding Simulator tab.")
         if len(st.session_state.actual_performance) == 0:
             st.warning("Please add actual performance data to compare.")
+
+elif tab == "📉 Market Monitoring":
+    st.title("📉 Market Monitoring")
+    
+    # Create tabs for different monitoring views
+    monitor_tab = st.tabs(["MSTR Price", "Options Analysis", "Covered Call Market"])
+    
+    with monitor_tab[0]:  # MSTR Price Tab
+        # Fetch MSTR data
+        try:
+            mstr = yf.Ticker("MSTR")
+            current_mstr_price = mstr.info['regularMarketPrice']
+            prev_close = mstr.info['previousClose']
+            price_change = current_mstr_price - prev_close
+            price_change_pct = (price_change / prev_close) * 100
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("MSTR Current Price", 
+                         f"${current_mstr_price:,.2f}",
+                         f"{price_change:,.2f} ({price_change_pct:,.1f}%)")
+            with col2:
+                st.metric("24h Volume", 
+                         f"{mstr.info['volume']:,.0f}",
+                         f"{((mstr.info['volume']/mstr.info['averageVolume'])-1)*100:,.1f}% vs Avg")
+            with col3:
+                st.metric("Market Cap",
+                         f"${mstr.info['marketCap']/1e9:,.2f}B")
+            
+            # Historical price chart
+            st.subheader("MSTR Price History")
+            timeframes = {
+                "1D": "1d",
+                "5D": "5d",
+                "1M": "1mo",
+                "3M": "3mo",
+                "6M": "6mo",
+                "YTD": "ytd",
+                "1Y": "1y",
+                "5Y": "5y"
+            }
+            selected_timeframe = st.selectbox("Select Timeframe", list(timeframes.keys()))
+            
+            hist = mstr.history(period=timeframes[selected_timeframe], interval="1d")
+            fig = go.Figure()
+            fig.add_trace(go.Candlestick(
+                x=hist.index,
+                open=hist['Open'],
+                high=hist['High'],
+                low=hist['Low'],
+                close=hist['Close'],
+                name='MSTR'
+            ))
+            fig.update_layout(
+                title=f"MSTR Price ({selected_timeframe})",
+                yaxis_title="Price ($)",
+                xaxis_title="Date",
+                height=600
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Volume chart
+            fig_volume = go.Figure()
+            fig_volume.add_trace(go.Bar(
+                x=hist.index,
+                y=hist['Volume'],
+                name='Volume'
+            ))
+            fig_volume.update_layout(
+                title="Trading Volume",
+                yaxis_title="Volume",
+                xaxis_title="Date",
+                height=300
+            )
+            st.plotly_chart(fig_volume, use_container_width=True)
+            
+            # Key statistics
+            st.subheader("Key Statistics")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("52 Week High", f"${mstr.info['fiftyTwoWeekHigh']:,.2f}")
+                st.metric("50 Day Avg", f"${mstr.info['fiftyDayAverage']:,.2f}")
+                st.metric("Beta", f"{mstr.info.get('beta', 'N/A')}")
+            with col2:
+                st.metric("52 Week Low", f"${mstr.info['fiftyTwoWeekLow']:,.2f}")
+                st.metric("200 Day Avg", f"${mstr.info['twoHundredDayAverage']:,.2f}")
+                st.metric("Shares Outstanding", f"{mstr.info['sharesOutstanding']:,.0f}")
+            with col3:
+                st.metric("52 Week Range", 
+                         f"${mstr.info['fiftyTwoWeekLow']:,.2f} - ${mstr.info['fiftyTwoWeekHigh']:,.2f}")
+                st.metric("Avg Volume", f"{mstr.info['averageVolume']:,.0f}")
+                st.metric("Float", f"{mstr.info.get('floatShares', 'N/A'):,.0f}")
+            
+        except Exception as e:
+            st.error(f"Error fetching MSTR data: {str(e)}")
+            st.info("If the error persists, you may need to wait a few minutes and try again.")
+    
+    with monitor_tab[1]:  # Options Analysis Tab
+        st.subheader("Options Market Analysis")
+        
+        try:
+            # Fetch all available expiration dates
+            exp_dates = mstr.options
+            
+            # Options market overview metrics
+            total_call_oi = 0
+            total_put_oi = 0
+            total_call_volume = 0
+            total_put_volume = 0
+            put_call_ratios = []
+            
+            # Collect data for all expiration dates
+            options_data = []
+            for date in exp_dates:
+                opt_chain = mstr.option_chain(date)
+                
+                # Calculate metrics for this expiration
+                calls_oi = opt_chain.calls['openInterest'].sum()
+                puts_oi = opt_chain.puts['openInterest'].sum()
+                calls_vol = opt_chain.calls['volume'].sum()
+                puts_vol = opt_chain.puts['volume'].sum()
+                
+                total_call_oi += calls_oi
+                total_put_oi += puts_oi
+                total_call_volume += calls_vol
+                total_put_volume += puts_vol
+                
+                # Calculate Put/Call ratio
+                pc_ratio_oi = puts_oi / calls_oi if calls_oi > 0 else 0
+                pc_ratio_vol = puts_vol / calls_vol if calls_vol > 0 else 0
+                
+                options_data.append({
+                    'Expiration': date,
+                    'Calls_OI': calls_oi,
+                    'Puts_OI': puts_oi,
+                    'Calls_Volume': calls_vol,
+                    'Puts_Volume': puts_vol,
+                    'PC_Ratio_OI': pc_ratio_oi,
+                    'PC_Ratio_Volume': pc_ratio_vol
+                })
+            
+            # Display overall options market metrics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Call Open Interest", f"{total_call_oi:,.0f}")
+                st.metric("Total Put Open Interest", f"{total_put_oi:,.0f}")
+            with col2:
+                st.metric("Total Call Volume", f"{total_call_volume:,.0f}")
+                st.metric("Total Put Volume", f"{total_put_volume:,.0f}")
+            with col3:
+                overall_pc_ratio_oi = total_put_oi / total_call_oi if total_call_oi > 0 else 0
+                overall_pc_ratio_vol = total_put_volume / total_call_volume if total_call_volume > 0 else 0
+                st.metric("Put/Call Ratio (OI)", f"{overall_pc_ratio_oi:.2f}")
+                st.metric("Put/Call Ratio (Volume)", f"{overall_pc_ratio_vol:.2f}")
+            
+            # Options Chain Analysis
+            st.subheader("Options Chain Analysis by Expiration")
+            
+            # Convert to DataFrame for display
+            options_df = pd.DataFrame(options_data)
+            st.dataframe(options_df.style.format({
+                'Calls_OI': '{:,.0f}',
+                'Puts_OI': '{:,.0f}',
+                'Calls_Volume': '{:,.0f}',
+                'Puts_Volume': '{:,.0f}',
+                'PC_Ratio_OI': '{:.2f}',
+                'PC_Ratio_Volume': '{:.2f}'
+            }))
+            
+            # Detailed Options Analysis for selected expiration
+            st.subheader("Detailed Options Analysis")
+            selected_exp = st.selectbox("Select Expiration Date", exp_dates)
+            
+            if selected_exp:
+                opt_chain = mstr.option_chain(selected_exp)
+                
+                # Analyze call options distribution
+                calls_df = opt_chain.calls.copy()
+                calls_df['moneyness'] = (calls_df['strike'] - current_mstr_price) / current_mstr_price
+                
+                # Plot options distribution
+                fig = go.Figure()
+                
+                # Call options distribution
+                fig.add_trace(go.Bar(
+                    x=calls_df['strike'],
+                    y=calls_df['openInterest'],
+                    name='Calls Open Interest',
+                    marker_color='green',
+                    opacity=0.6
+                ))
+                
+                # Put options distribution
+                puts_df = opt_chain.puts.copy()
+                fig.add_trace(go.Bar(
+                    x=puts_df['strike'],
+                    y=puts_df['openInterest'],
+                    name='Puts Open Interest',
+                    marker_color='red',
+                    opacity=0.6
+                ))
+                
+                # Add current price line
+                fig.add_vline(x=current_mstr_price, line_dash="dash", line_color="blue",
+                            annotation_text="Current Price")
+                
+                fig.update_layout(
+                    title=f"Options Open Interest Distribution ({selected_exp})",
+                    xaxis_title="Strike Price ($)",
+                    yaxis_title="Open Interest",
+                    barmode='overlay'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Display options chain details
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("Calls Analysis")
+                    calls_analysis = calls_df[['strike', 'lastPrice', 'volume', 'openInterest', 'impliedVolatility']]
+                    st.dataframe(calls_analysis.style.format({
+                        'strike': '${:,.2f}',
+                        'lastPrice': '${:,.2f}',
+                        'volume': '{:,.0f}',
+                        'openInterest': '{:,.0f}',
+                        'impliedVolatility': '{:.1%}'
+                    }))
+                
+                with col2:
+                    st.subheader("Puts Analysis")
+                    puts_analysis = puts_df[['strike', 'lastPrice', 'volume', 'openInterest', 'impliedVolatility']]
+                    st.dataframe(puts_analysis.style.format({
+                        'strike': '${:,.2f}',
+                        'lastPrice': '${:,.2f}',
+                        'volume': '{:,.0f}',
+                        'openInterest': '{:,.0f}',
+                        'impliedVolatility': '{:.1%}'
+                    }))
+        
+        except Exception as e:
+            st.error(f"Error analyzing options data: {str(e)}")
+    
+    with monitor_tab[2]:  # Covered Call Market Tab
+        st.subheader("Covered Call Market Analysis")
+        
+        # List of ETFs/Funds known to write covered calls on MSTR
+        covered_call_funds = {
+            'QYLD': 'Global X NASDAQ-100 Covered Call ETF',
+            'XYLD': 'Global X S&P 500 Covered Call ETF',
+            'JEPI': 'JPMorgan Equity Premium Income ETF'
+            # Add more funds as they become available
+        }
+        
+        try:
+            # Analyze each fund's potential MSTR exposure
+            fund_data = []
+            
+            for symbol, name in covered_call_funds.items():
+                fund = yf.Ticker(symbol)
+                
+                try:
+                    aum = fund.info.get('totalAssets', 0)
+                    volume = fund.info.get('volume', 0)
+                    
+                    fund_data.append({
+                        'Symbol': symbol,
+                        'Name': name,
+                        'AUM': aum,
+                        'Daily Volume': volume
+                    })
+                except:
+                    continue
+            
+            if fund_data:
+                funds_df = pd.DataFrame(fund_data)
+                st.dataframe(funds_df.style.format({
+                    'AUM': '${:,.0f}',
+                    'Daily Volume': '{:,.0f}'
+                }))
+            
+            # Covered Call Market Metrics
+            st.subheader("Covered Call Market Metrics")
+            
+            # Calculate metrics for near-the-money calls
+            try:
+                current_price = mstr.info['regularMarketPrice']
+                next_exp = mstr.options[0]  # Nearest expiration
+                calls = mstr.option_chain(next_exp).calls
+                
+                # Find near-the-money calls (within 5% of current price)
+                ntm_calls = calls[
+                    (calls['strike'] >= current_price * 0.95) &
+                    (calls['strike'] <= current_price * 1.05)
+                ]
+                
+                # Calculate covered call market metrics
+                total_ntm_premium = (ntm_calls['lastPrice'] * ntm_calls['openInterest']).sum()
+                avg_call_premium = ntm_calls['lastPrice'].mean()
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Near-the-Money Call Premium", f"${avg_call_premium:,.2f}")
+                    st.metric("Total Premium Value", f"${total_ntm_premium:,.2f}")
+                with col2:
+                    st.metric("Active Covered Calls", f"{ntm_calls['openInterest'].sum():,.0f}")
+                    st.metric("Daily Volume", f"{ntm_calls['volume'].sum():,.0f}")
+                
+                # Premium Yield Analysis
+                if avg_call_premium > 0:
+                    monthly_yield = (avg_call_premium / current_price) * 100
+                    annual_yield = monthly_yield * 12
+                    
+                    st.metric("Estimated Monthly Yield", f"{monthly_yield:.1f}%")
+                    st.metric("Estimated Annual Yield", f"{annual_yield:.1f}%")
+                
+            except Exception as e:
+                st.error(f"Error calculating covered call metrics: {str(e)}")
+            
+        except Exception as e:
+            st.error(f"Error analyzing covered call market: {str(e)}")
