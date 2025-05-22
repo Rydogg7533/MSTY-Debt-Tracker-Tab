@@ -1,11 +1,36 @@
-
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+import yfinance as yf
+import numpy as np
+from datetime import datetime, timedelta
+import plotly.graph_objects as go
+import plotly.express as px
+from fpdf import FPDF
+import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
+from dotenv import load_dotenv
+import io
+import base64
+
+# Load environment variables
+load_dotenv()
 
 st.set_page_config(page_title="MSTY Tool", layout="wide")
 
-tab = st.sidebar.selectbox("Select Tool", ["📈 Compounding Simulator", "📊 Cost Basis Tool", "💸 Return on Debt"])
+# Initialize session state for simulation results if not exists
+if 'simulation_results' not in st.session_state:
+    st.session_state.simulation_results = None
+if 'actual_performance' not in st.session_state:
+    st.session_state.actual_performance = []
+if 'market_data' not in st.session_state:
+    st.session_state.market_data = []
+if 'last_dividend' not in st.session_state:
+    st.session_state.last_dividend = None
+
+tab = st.sidebar.selectbox("Select Tool", ["📈 Compounding Simulator", "📊 Cost Basis Tool", "💸 Return on Debt", "🛡️ Hedging Tool", "📊 Simulated vs. Actual", "📉 Market Monitoring", "�� Export Center"])
 
 if tab == "📈 Compounding Simulator":
     st.title("📈 Compounding Simulator")
@@ -192,3 +217,411 @@ elif tab == "💸 Return on Debt":
         st.markdown(f"**New Shares Reinvested:** {new_shares:,.2f}")
         st.markdown(f"**Final Total Shares:** {final_share_count:,.2f}")
         st.markdown(f"**Portfolio Value at Exit Price:** ${final_value:,.2f}")
+
+elif tab == "🛡️ Hedging Tool":
+    st.title("🛡️ MSTR Hedging Tool")
+    
+    # Fetch MSTR data
+    try:
+        mstr = yf.Ticker("MSTR")
+        current_mstr_price = mstr.info['regularMarketPrice']
+        st.success(f"Current MSTR Price: ${current_mstr_price:,.2f}")
+    except:
+        current_mstr_price = st.number_input("MSTR Current Price ($)", min_value=0.01, value=500.0)
+        st.warning("Could not fetch live MSTR price. Using manual input.")
+
+    # User inputs with explanations
+    st.subheader("Your Position Details")
+    col1, col2 = st.columns(2)
+    with col1:
+        msty_holdings = st.number_input("Your MSTY Holdings (shares)", min_value=0)
+        msty_price = st.number_input("Current MSTY Price ($)", min_value=0.01, value=25.0)
+        expected_exit_price = st.number_input("Expected Bottom/Exit Price ($)", 
+                                            min_value=0.01, 
+                                            value=msty_price * 0.7,
+                                            help="The price level at which you want maximum protection or expect to exit the position")
+    with col2:
+        correlation = st.slider("MSTR-MSTY Correlation", min_value=0.0, max_value=1.0, value=0.85,
+                              help="Historical correlation between MSTR and MSTY prices. Higher values indicate stronger price relationship.")
+        hedge_percentage = st.slider("Desired Hedge Percentage", min_value=0, max_value=100, value=50,
+                                   help="Percentage of your position you want to hedge. 100% provides maximum protection but higher cost.")
+
+    # Calculate initial position metrics
+    msty_position_value = msty_holdings * msty_price
+    hedge_value_needed = msty_position_value * (hedge_percentage / 100)
+    
+    # Calculate max loss with protection against division by zero
+    if msty_position_value > 0:
+        max_loss_without_hedge = msty_position_value - (msty_holdings * expected_exit_price)
+        max_loss_percentage = f"-{(max_loss_without_hedge/msty_position_value*100):,.1f}%"
+    else:
+        max_loss_without_hedge = 0
+        max_loss_percentage = "0%"
+
+    # Display position summary
+    st.subheader("Position Summary")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("MSTY Position Value", f"${msty_position_value:,.2f}")
+    with col2:
+        st.metric("Hedge Value Needed", f"${hedge_value_needed:,.2f}")
+    with col3:
+        st.metric("Max Potential Loss", f"${max_loss_without_hedge:,.2f}",
+                 delta=max_loss_percentage)
+
+    # Detailed hedge calculation explanation
+    st.subheader("Hedge Calculation Details")
+    st.write("""
+    The hedge is calculated using the following steps:
+    1. Calculate total MSTY position value
+    2. Determine hedge value needed based on hedge percentage
+    3. Convert MSTY hedge value to MSTR equivalent using correlation
+    4. Calculate number of put contracts needed (each contract = 100 shares)
+    5. Determine optimal strike price based on expected exit price
+    """)
+
+    # Show the math
+    mstr_equivalent = hedge_value_needed / (current_mstr_price * correlation)
+    contracts_needed = mstr_equivalent / 100
+    
+    # Calculate equivalent MSTR price for expected exit
+    mstr_equivalent_exit = expected_exit_price / msty_price * current_mstr_price
+    
+    st.write(f"""
+    **Detailed Calculations:**
+    - MSTY Position Value = {msty_holdings:,.0f} shares × ${msty_price:.2f} = ${msty_position_value:,.2f}
+    - Hedge Value Needed = ${msty_position_value:,.2f} × {hedge_percentage}% = ${hedge_value_needed:,.2f}
+    - MSTR Equivalent Shares = ${hedge_value_needed:,.2f} ÷ (${current_mstr_price:.2f} × {correlation:.2f}) = {mstr_equivalent:.2f} shares
+    - Contracts Needed = {mstr_equivalent:.2f} shares ÷ 100 shares/contract = {contracts_needed:.2f} contracts
+    - Equivalent MSTR Exit Price = ${current_mstr_price:.2f} × (${expected_exit_price:.2f} ÷ ${msty_price:.2f}) = ${mstr_equivalent_exit:.2f}
+    """)
+
+    # Fetch options chain
+    if st.button("Fetch Put Options"):
+        try:
+            # Get options expiration dates
+            exp_dates = mstr.options
+            
+            if exp_dates:
+                # Convert expiration dates to more readable format and add days until expiry
+                exp_dates_info = []
+                for date in exp_dates:
+                    exp_date = datetime.strptime(date, '%Y-%m-%d')
+                    days_to_exp = (exp_date - datetime.now()).days
+                    exp_dates_info.append({
+                        'date': date,
+                        'days': days_to_exp,
+                        'display': f"{date} ({days_to_exp} days)"
+                    })
+                
+                selected_date = st.selectbox(
+                    "Select Expiration Date",
+                    options=[info['date'] for info in exp_dates_info],
+                    format_func=lambda x: next(info['display'] for info in exp_dates_info if info['date'] == x)
+                )
+                
+                # Get options chain for selected date
+                opts = mstr.option_chain(selected_date)
+                puts_df = opts.puts.copy()
+                
+                # Calculate relevant fields
+                puts_df['Strike_Diff'] = abs(puts_df['strike'] - mstr_equivalent_exit)
+                puts_df['Strike_Pct'] = (puts_df['strike'] - current_mstr_price) / current_mstr_price * 100
+                puts_df = puts_df.sort_values('Strike_Diff')
+                
+                # Find optimal strikes based on different strategies
+                try:
+                    target_put = puts_df.iloc[0]  # Closest to target exit price
+                except IndexError:
+                    st.error("No put options data available for the selected date.")
+                    st.stop()
+
+                # Find ATM put (closest to current price)
+                puts_df['Current_Price_Diff'] = abs(puts_df['strike'] - current_mstr_price)
+                atm_put = puts_df.sort_values('Current_Price_Diff').iloc[0]
+                
+                # Find OTM puts
+                otm_puts = puts_df[puts_df['strike'] < current_mstr_price].sort_values('strike', ascending=False)
+                
+                st.subheader("Hedge Recommendations")
+                
+                # Calculate total hedge cost for different strategies
+                def calculate_hedge_cost(strike_price, option_price):
+                    contracts = round(contracts_needed, 2)
+                    total_cost = contracts * option_price * 100
+                    max_protection = contracts * strike_price * 100
+                    protection_at_exit = contracts * max(0, strike_price - mstr_equivalent_exit) * 100
+                    return contracts, total_cost, max_protection, protection_at_exit
+                
+                # Display recommendations for different strike prices
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.write("**Target Exit Strategy**")
+                    target_contracts, target_cost, target_protection, target_exit_prot = calculate_hedge_cost(target_put['strike'], target_put['ask'])
+                    st.write(f"""
+                    - Strike Price: ${target_put['strike']:,.2f}
+                    - Contracts Needed: {target_contracts:.2f}
+                    - Premium per Contract: ${target_put['ask']:,.2f}
+                    - Total Cost: ${target_cost:,.2f}
+                    - Protection at Exit: ${target_exit_prot:,.2f}
+                    """)
+                
+                with col2:
+                    st.write("**At-the-Money (ATM) Strategy**")
+                    atm_contracts, atm_cost, atm_protection, atm_exit_prot = calculate_hedge_cost(atm_put['strike'], atm_put['ask'])
+                    st.write(f"""
+                    - Strike Price: ${atm_put['strike']:,.2f}
+                    - Contracts Needed: {atm_contracts:.2f}
+                    - Premium per Contract: ${atm_put['ask']:,.2f}
+                    - Total Cost: ${atm_cost:,.2f}
+                    - Protection at Exit: ${atm_exit_prot:,.2f}
+                    """)
+                
+                with col3:
+                    if not otm_puts.empty:
+                        st.write("**Out-of-the-Money (OTM) Strategy**")
+                        otm_put = otm_puts.iloc[0]
+                        otm_contracts, otm_cost, otm_protection, otm_exit_prot = calculate_hedge_cost(otm_put['strike'], otm_put['ask'])
+                        st.write(f"""
+                        - Strike Price: ${otm_put['strike']:,.2f}
+                        - Contracts Needed: {otm_contracts:.2f}
+                        - Premium per Contract: ${otm_put['ask']:,.2f}
+                        - Total Cost: ${otm_cost:,.2f}
+                        - Protection at Exit: ${otm_exit_prot:,.2f}
+                        """)
+                
+                # Display full options chain with enhanced information
+                st.subheader("Available Put Options")
+                display_cols = ['strike', 'Strike_Pct', 'lastPrice', 'bid', 'ask', 'volume', 'openInterest', 'impliedVolatility']
+                display_df = puts_df[display_cols].head(10).copy()
+                display_df.columns = ['Strike', '% From Current', 'Last Price', 'Bid', 'Ask', 'Volume', 'Open Interest', 'Implied Volatility']
+                
+                st.dataframe(display_df.style.format({
+                    'Strike': '${:,.2f}',
+                    '% From Current': '{:,.1f}%',
+                    'Last Price': '${:,.2f}',
+                    'Bid': '${:,.2f}',
+                    'Ask': '${:,.2f}',
+                    'Volume': '{:,.0f}',
+                    'Open Interest': '{:,.0f}',
+                    'Implied Volatility': '{:.1%}'
+                }))
+                
+                # Hedge visualization
+                st.subheader("Hedge Visualization")
+                fig = go.Figure()
+                
+                # Add current position value
+                fig.add_hline(y=msty_position_value, line_dash="dash", line_color="green",
+                            annotation_text="Current Position Value")
+                
+                # Add expected exit price line
+                fig.add_hline(y=msty_holdings * expected_exit_price, line_dash="dash", line_color="red",
+                            annotation_text="Expected Exit Value")
+                
+                # Add hedged position scenarios
+                price_range = np.linspace(current_mstr_price * 0.5, current_mstr_price * 1.5, 100)
+                
+                # Target exit hedge scenario
+                target_hedged_values = [msty_position_value - max(0, (target_put['strike'] - p) * mstr_equivalent)
+                                      for p in price_range]
+                fig.add_trace(go.Scatter(x=price_range, y=target_hedged_values,
+                                       name=f"Target Exit Hedged (Strike: ${target_put['strike']:,.2f})"))
+                
+                # ATM hedge scenario
+                atm_hedged_values = [msty_position_value - max(0, (atm_put['strike'] - p) * mstr_equivalent)
+                                   for p in price_range]
+                fig.add_trace(go.Scatter(x=price_range, y=atm_hedged_values,
+                                       name=f"ATM Hedged (Strike: ${atm_put['strike']:,.2f})"))
+                
+                # OTM hedge scenario if available
+                if not otm_puts.empty:
+                    otm_hedged_values = [msty_position_value - max(0, (otm_put['strike'] - p) * mstr_equivalent)
+                                       for p in price_range]
+                    fig.add_trace(go.Scatter(x=price_range, y=otm_hedged_values,
+                                           name=f"OTM Hedged (Strike: ${otm_put['strike']:,.2f})"))
+                
+                fig.update_layout(
+                    title="Position Value vs MSTR Price",
+                    xaxis_title="MSTR Price ($)",
+                    yaxis_title="Position Value ($)",
+                    hovermode="x unified"
+                )
+                st.plotly_chart(fig)
+                
+                # Add cost-benefit analysis
+                st.subheader("Cost-Benefit Analysis")
+                analysis_df = pd.DataFrame({
+                    'Strategy': ['Target Exit', 'ATM', 'OTM'] if not otm_puts.empty else ['Target Exit', 'ATM'],
+                    'Strike Price': [target_put['strike'], atm_put['strike'], otm_put['strike']] if not otm_puts.empty else [target_put['strike'], atm_put['strike']],
+                    'Total Cost': [target_cost, atm_cost, otm_cost] if not otm_puts.empty else [target_cost, atm_cost],
+                    'Protection at Exit': [target_exit_prot, atm_exit_prot, otm_exit_prot] if not otm_puts.empty else [target_exit_prot, atm_exit_prot],
+                    'Cost % of Position': [target_cost/msty_position_value*100, atm_cost/msty_position_value*100, otm_cost/msty_position_value*100] if not otm_puts.empty else [target_cost/msty_position_value*100, atm_cost/msty_position_value*100],
+                    'Protection % at Exit': [target_exit_prot/max_loss_without_hedge*100, atm_exit_prot/max_loss_without_hedge*100, otm_exit_prot/max_loss_without_hedge*100] if not otm_puts.empty else [target_exit_prot/max_loss_without_hedge*100, atm_exit_prot/max_loss_without_hedge*100]
+                })
+                
+                st.dataframe(analysis_df.style.format({
+                    'Strike Price': '${:,.2f}',
+                    'Total Cost': '${:,.2f}',
+                    'Protection at Exit': '${:,.2f}',
+                    'Cost % of Position': '{:.1f}%',
+                    'Protection % at Exit': '{:.1f}%'
+                }))
+                
+            else:
+                st.error("No options data available for MSTR")
+        except Exception as e:
+            st.error(f"Error fetching options data: {str(e)}")
+            st.info("If the error persists, you may need to wait a few minutes and try again.")
+
+elif tab == "📊 Simulated vs. Actual":
+    st.title("📊 Simulated vs. Actual Performance")
+
+    # Add actual performance data
+    st.subheader("Add Actual Performance Data")
+    with st.form("add_actual_performance"):
+        date = st.date_input("Date", value=datetime.today())
+        actual_shares = st.number_input("Actual Shares", min_value=0.0, step=1.0)
+        actual_dividends = st.number_input("Actual Dividends Received ($)", min_value=0.0, step=1.0)
+        actual_reinvested = st.number_input("Amount Reinvested ($)", min_value=0.0, step=1.0)
+        reinvestment_price = st.number_input("Reinvestment Price per Share ($)", min_value=0.01, step=0.01)
+        submitted = st.form_submit_button("Add Entry")
+        
+        if submitted:
+            new_shares_from_reinvestment = actual_reinvested / reinvestment_price if reinvestment_price > 0 else 0
+            st.session_state.actual_performance.append({
+                "Date": date.strftime("%Y-%m"),
+                "Actual_Shares": actual_shares,
+                "Actual_Dividends": actual_dividends,
+                "Actual_Reinvested": actual_reinvested,
+                "Reinvestment_Price": reinvestment_price,
+                "New_Shares_From_Reinvestment": new_shares_from_reinvestment
+            })
+
+    # View selection
+    view_mode = st.selectbox("View Mode", ["Monthly", "Yearly", "Total"])
+    
+    if st.session_state.simulation_results is not None and len(st.session_state.actual_performance) > 0:
+        # Create comparison DataFrame
+        actual_df = pd.DataFrame(st.session_state.actual_performance)
+        sim_df = st.session_state.simulation_results.copy()
+        
+        # Merge simulation and actual data
+        comparison_df = pd.merge(sim_df, actual_df, on="Date", how="outer")
+        
+        if view_mode == "Yearly":
+            comparison_df['Year'] = pd.to_datetime(comparison_df['Date']).dt.year
+            comparison_df = comparison_df.groupby("Year").agg({
+                "Shares": "last",
+                "Net_Dividends": "sum",
+                "Reinvested": "sum",
+                "Actual_Shares": "last",
+                "Actual_Dividends": "sum",
+                "Actual_Reinvested": "sum",
+                "Reinvestment_Price": "mean",
+                "New_Shares_From_Reinvestment": "sum"
+            }).reset_index()
+        elif view_mode == "Total":
+            comparison_df = pd.DataFrame([{
+                "Shares": comparison_df["Shares"].iloc[-1],
+                "Net_Dividends": comparison_df["Net_Dividends"].sum(),
+                "Reinvested": comparison_df["Reinvested"].sum(),
+                "Actual_Shares": comparison_df["Actual_Shares"].iloc[-1],
+                "Actual_Dividends": comparison_df["Actual_Dividends"].sum(),
+                "Actual_Reinvested": comparison_df["Actual_Reinvested"].sum(),
+                "Reinvestment_Price": comparison_df["Reinvestment_Price"].mean(),
+                "New_Shares_From_Reinvestment": comparison_df["New_Shares_From_Reinvestment"].sum()
+            }])
+        
+        # Calculate differences
+        comparison_df["Share_Difference"] = comparison_df["Actual_Shares"] - comparison_df["Shares"]
+        comparison_df["Dividend_Difference"] = comparison_df["Actual_Dividends"] - comparison_df["Net_Dividends"]
+        comparison_df["Reinvested_Difference"] = comparison_df["Actual_Reinvested"] - comparison_df["Reinvested"]
+        
+        # Calculate weighted average reinvestment price
+        total_reinvested = comparison_df["Actual_Reinvested"].sum()
+        total_new_shares = comparison_df["New_Shares_From_Reinvestment"].sum()
+        if total_new_shares > 0:
+            weighted_avg_price = total_reinvested / total_new_shares
+        else:
+            weighted_avg_price = 0
+
+        # Display comparison metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            share_diff = comparison_df["Share_Difference"].iloc[-1]
+            st.metric("Share Difference", f"{share_diff:,.2f}", 
+                     delta=f"{(share_diff/comparison_df['Shares'].iloc[-1]*100):,.1f}%" if comparison_df['Shares'].iloc[-1] > 0 else "0%")
+        with col2:
+            div_diff = comparison_df["Dividend_Difference"].sum()
+            st.metric("Dividend Difference", f"${div_diff:,.2f}", 
+                     delta=f"{(div_diff/comparison_df['Net_Dividends'].sum()*100):,.1f}%" if comparison_df['Net_Dividends'].sum() > 0 else "0%")
+        with col3:
+            reinv_diff = comparison_df["Reinvested_Difference"].sum()
+            st.metric("Reinvestment Difference", f"${reinv_diff:,.2f}", 
+                     delta=f"{(reinv_diff/comparison_df['Reinvested'].sum()*100):,.1f}%" if comparison_df['Reinvested'].sum() > 0 else "0%")
+        with col4:
+            st.metric("Weighted Avg Reinvestment Price", f"${weighted_avg_price:,.2f}")
+
+        # Display reinvestment summary
+        st.subheader("Reinvestment Summary")
+        summary_col1, summary_col2, summary_col3 = st.columns(3)
+        with summary_col1:
+            st.metric("Total Amount Reinvested", f"${total_reinvested:,.2f}")
+        with summary_col2:
+            st.metric("Total Shares from Reinvestment", f"{total_new_shares:,.2f}")
+        with summary_col3:
+            st.metric("Weighted Avg Reinvestment Price", f"${weighted_avg_price:,.2f}")
+        
+        # Display detailed comparison table
+        st.subheader("Detailed Comparison")
+        st.dataframe(comparison_df.style.format({
+            "Shares": "{:,.2f}",
+            "Net_Dividends": "${:,.2f}",
+            "Reinvested": "${:,.2f}",
+            "Actual_Shares": "{:,.2f}",
+            "Actual_Dividends": "${:,.2f}",
+            "Actual_Reinvested": "${:,.2f}",
+            "Reinvestment_Price": "${:,.2f}",
+            "New_Shares_From_Reinvestment": "{:,.2f}",
+            "Share_Difference": "{:,.2f}",
+            "Dividend_Difference": "${:,.2f}",
+            "Reinvested_Difference": "${:,.2f}"
+        }))
+        
+        # Visualization
+        if view_mode != "Total":
+            # Share Growth Comparison
+            fig1 = go.Figure()
+            fig1.add_trace(go.Scatter(x=comparison_df['Year'] if view_mode == "Yearly" else comparison_df['Date'],
+                                    y=comparison_df['Shares'],
+                                    name='Simulated Shares',
+                                    line=dict(color='blue')))
+            fig1.add_trace(go.Scatter(x=comparison_df['Year'] if view_mode == "Yearly" else comparison_df['Date'],
+                                    y=comparison_df['Actual_Shares'],
+                                    name='Actual Shares',
+                                    line=dict(color='green')))
+            fig1.update_layout(title='Share Growth Comparison',
+                             xaxis_title='Time Period',
+                             yaxis_title='Number of Shares')
+            st.plotly_chart(fig1)
+            
+            # Dividend Comparison
+            fig2 = go.Figure()
+            fig2.add_trace(go.Bar(x=comparison_df['Year'] if view_mode == "Yearly" else comparison_df['Date'],
+                                y=comparison_df['Net_Dividends'],
+                                name='Simulated Dividends'))
+            fig2.add_trace(go.Bar(x=comparison_df['Year'] if view_mode == "Yearly" else comparison_df['Date'],
+                                y=comparison_df['Actual_Dividends'],
+                                name='Actual Dividends'))
+            fig2.update_layout(title='Dividend Comparison',
+                             xaxis_title='Time Period',
+                             yaxis_title='Dividends ($)',
+                             barmode='group')
+            st.plotly_chart(fig2)
+    else:
+        if st.session_state.simulation_results is None:
+            st.warning("Please run a simulation first in the Compounding Simulator tab.")
+        if len(st.session_state.actual_performance) == 0:
+            st.warning("Please add actual performance data to compare.")

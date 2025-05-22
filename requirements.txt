@@ -1,2 +1,7 @@
-streamlit
-pandas
+streamlit>=1.32.0
+pandas>=2.2.0
+yfinance>=0.2.36
+numpy>=1.26.0
+plotly>=5.18.0
+fpdf>=1.7.2
+python-dotenv>=1.0.0
