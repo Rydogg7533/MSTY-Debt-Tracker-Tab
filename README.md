@@ -24,7 +24,7 @@ A comprehensive financial tracking application for MSTY investments with multipl
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/MSTY-Debt-Tracker-Tab.git
+git clone https://github.com/Rydogg7533/MSTY-Debt-Tracker-Tab.git
 cd MSTY-Debt-Tracker-Tab
 ```
 
