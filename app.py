@@ -29,6 +29,8 @@ if 'market_data' not in st.session_state:
     st.session_state.market_data = []
 if 'last_dividend' not in st.session_state:
     st.session_state.last_dividend = None
+if 'market_history' not in st.session_state:
+    st.session_state.market_history = []
 
 tab = st.sidebar.selectbox("Select Tool", ["📈 Compounding Simulator", "📊 Cost Basis Tool", "💸 Return on Debt", "🛡️ Hedging Tool", "📊 Simulated vs. Actual", "📉 Market Monitoring", "�� Export Center"])
 
@@ -943,5 +945,169 @@ elif tab == "📉 Market Monitoring":
             except Exception as e:
                 st.error(f"Error calculating covered call metrics: {str(e)}")
             
+            # Historical Trends Analysis
+            st.subheader("Market Convergence/Divergence Analysis")
+            
+            # Update market history
+            update_market_history()
+            
+            if len(st.session_state.market_history) > 1:
+                history_df = pd.DataFrame(st.session_state.market_history)
+                
+                # Create convergence/divergence plot
+                fig_conv = go.Figure()
+                
+                # Plot covered call ratio trend
+                fig_conv.add_trace(go.Scatter(
+                    x=history_df['date'],
+                    y=history_df['covered_call_ratio'],
+                    name='Covered Call Ratio',
+                    line=dict(color='blue')
+                ))
+                
+                # Plot market activity ratio trend
+                fig_conv.add_trace(go.Scatter(
+                    x=history_df['date'],
+                    y=history_df['market_activity_ratio'],
+                    name='Market Activity Ratio',
+                    line=dict(color='red')
+                ))
+                
+                # Calculate and plot convergence/divergence
+                history_df['convergence'] = history_df['covered_call_ratio'] - history_df['market_activity_ratio']
+                fig_conv.add_trace(go.Bar(
+                    x=history_df['date'],
+                    y=history_df['convergence'],
+                    name='Convergence/Divergence',
+                    marker_color='green',
+                    opacity=0.3
+                ))
+                
+                fig_conv.update_layout(
+                    title="Options Market Convergence/Divergence Analysis",
+                    xaxis_title="Date",
+                    yaxis_title="Ratio",
+                    height=400,
+                    showlegend=True
+                )
+                st.plotly_chart(fig_conv, use_container_width=True)
+                
+                # Market trend metrics
+                st.subheader("Market Trend Metrics")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Calculate trend indicators
+                    latest_conv = history_df['convergence'].iloc[-1]
+                    conv_change = latest_conv - history_df['convergence'].iloc[-2]
+                    
+                    st.metric(
+                        "Current Convergence",
+                        f"{latest_conv:.3f}",
+                        f"{conv_change:+.3f}"
+                    )
+                    
+                    # Market pressure indicator
+                    pressure = "Increasing" if conv_change > 0 else "Decreasing"
+                    st.metric(
+                        "Market Pressure",
+                        pressure,
+                        f"{abs(conv_change/latest_conv)*100:.1f}% change" if latest_conv != 0 else "N/A"
+                    )
+                
+                with col2:
+                    # Calculate moving averages
+                    history_df['ma5'] = history_df['convergence'].rolling(5).mean()
+                    history_df['ma10'] = history_df['convergence'].rolling(10).mean()
+                    
+                    latest_ma5 = history_df['ma5'].iloc[-1]
+                    latest_ma10 = history_df['ma10'].iloc[-1]
+                    
+                    st.metric(
+                        "5-Day Moving Average",
+                        f"{latest_ma5:.3f}" if not pd.isna(latest_ma5) else "N/A"
+                    )
+                    st.metric(
+                        "10-Day Moving Average",
+                        f"{latest_ma10:.3f}" if not pd.isna(latest_ma10) else "N/A"
+                    )
+                
+                # Historical data table
+                st.subheader("Historical Data")
+                display_df = history_df[[
+                    'date', 'price', 'covered_call_ratio', 'market_activity_ratio', 'convergence'
+                ]].copy()
+                st.dataframe(display_df.style.format({
+                    'price': '${:,.2f}',
+                    'covered_call_ratio': '{:.3f}',
+                    'market_activity_ratio': '{:.3f}',
+                    'convergence': '{:.3f}'
+                }))
+            else:
+                st.info("Collecting market history data. Check back tomorrow for trend analysis.")
+            
         except Exception as e:
             st.error(f"Error analyzing covered call market: {str(e)}")
+
+def update_market_history():
+    """Update market history with current metrics"""
+    try:
+        mstr = yf.Ticker("MSTR")
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # Get options data
+        exp_dates = mstr.options
+        total_call_oi = 0
+        total_put_oi = 0
+        total_call_volume = 0
+        total_put_volume = 0
+        ntm_call_oi = 0
+        ntm_call_volume = 0
+        
+        current_price = mstr.info['regularMarketPrice']
+        
+        for date in exp_dates:
+            opt_chain = mstr.option_chain(date)
+            
+            # Total market metrics
+            total_call_oi += opt_chain.calls['openInterest'].sum()
+            total_put_oi += opt_chain.puts['openInterest'].sum()
+            total_call_volume += opt_chain.calls['volume'].sum()
+            total_put_volume += opt_chain.puts['volume'].sum()
+            
+            # Near-the-money call metrics
+            ntm_calls = opt_chain.calls[
+                (opt_chain.calls['strike'] >= current_price * 0.95) &
+                (opt_chain.calls['strike'] <= current_price * 1.05)
+            ]
+            ntm_call_oi += ntm_calls['openInterest'].sum()
+            ntm_call_volume += ntm_calls['volume'].sum()
+        
+        # Calculate market ratios
+        covered_call_ratio = ntm_call_oi / total_call_oi if total_call_oi > 0 else 0
+        market_activity_ratio = ntm_call_volume / total_call_volume if total_call_volume > 0 else 0
+        
+        # Store metrics
+        metrics = {
+            'date': current_date,
+            'price': current_price,
+            'total_call_oi': total_call_oi,
+            'total_put_oi': total_put_oi,
+            'total_call_volume': total_call_volume,
+            'total_put_volume': total_put_volume,
+            'ntm_call_oi': ntm_call_oi,
+            'ntm_call_volume': ntm_call_volume,
+            'covered_call_ratio': covered_call_ratio,
+            'market_activity_ratio': market_activity_ratio
+        }
+        
+        # Add to history if it's a new day
+        if not st.session_state.market_history or st.session_state.market_history[-1]['date'] != current_date:
+            st.session_state.market_history.append(metrics)
+            
+            # Keep only last 30 days of history
+            if len(st.session_state.market_history) > 30:
+                st.session_state.market_history.pop(0)
+                
+    except Exception as e:
+        st.error(f"Error updating market history: {str(e)}")
